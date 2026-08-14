@@ -61,6 +61,10 @@ require("lazy").setup({
 				"bash",
 				"rust",
 				"toml",
+				"go",
+				"gomod",
+				"gosum",
+				"gowork",
 			},
 			sync_install = false,
 			auto_install = true,
@@ -171,6 +175,7 @@ require("lazy").setup({
 					"lua_ls",
 					"bashls",
 					"rust_analyzer",
+					"gopls",
 				},
 			})
 
@@ -235,6 +240,33 @@ require("lazy").setup({
 					["rust-analyzer"] = {
 						check = { command = "clippy" },
 						cargo = { allFeatures = true },
+					},
+				},
+			})
+
+			vim.lsp.config("gopls", {
+				settings = {
+					gopls = {
+						-- staticcheck adds the `go vet`-style lints gopls doesn't run by default
+						staticcheck = true,
+						gofumpt = true,
+						analyses = {
+							unusedparams = true,
+							unusedwrite = true,
+							nilness = true,
+							shadow = true,
+							useany = true,
+						},
+						hints = {
+							assignVariableTypes = true,
+							compositeLiteralFields = true,
+							constantValues = true,
+							functionTypeParameters = true,
+							parameterNames = true,
+							rangeVariableTypes = true,
+						},
+						codelenses = { gc_details = false, test = true, tidy = true },
+						semanticTokens = true,
 					},
 				},
 			})
@@ -379,6 +411,7 @@ require("lazy").setup({
 				markdown = { "prettier" },
 				lua = { "stylua" },
 				rust = { "rustfmt" },
+				go = { "goimports", "gofumpt" },
 			},
 			format_after_save = function(bufnr)
 				if vim.b[bufnr].disable_autoformat or vim.g.disable_autoformat then
@@ -697,6 +730,18 @@ vim.keymap.set("n", "]d", function()
 end, { desc = "Next diagnostic" })
 vim.keymap.set("n", "ge", vim.diagnostic.open_float, { desc = "Show diagnostic under cursor" })
 vim.keymap.set("n", "<leader>q", vim.diagnostic.setloclist, { desc = "Diagnostic quickfix list" })
+
+-- Go is formatted with tabs by gofmt, so don't expand them in Go buffers.
+vim.api.nvim_create_autocmd("FileType", {
+	pattern = "go",
+	group = vim.api.nvim_create_augroup("go-indent", { clear = true }),
+	callback = function()
+		vim.bo.expandtab = false
+		vim.bo.tabstop = 4
+		vim.bo.shiftwidth = 4
+		vim.bo.softtabstop = 4
+	end,
+})
 
 -- console.log snippet in JS/TS via <C-l>
 vim.api.nvim_create_autocmd("FileType", {

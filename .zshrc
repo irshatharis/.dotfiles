@@ -182,6 +182,11 @@ esac
 
 export PATH="$PATH:/$HOME/.dotfiles/scripts"
 
+# Go: `go install` drops binaries (goimports, gofumpt, ...) in $GOPATH/bin, which
+# isn't on PATH by default. Hardcoded instead of `$(go env GOPATH)` to avoid a
+# subprocess on every shell start.
+export PATH="$PATH:$HOME/go/bin"
+
 # Completions: initialize zsh's completion system once, fast. -C reuses the cached
 # ~/.zcompdump and skips the slow per-file security audit; the dump is rebuilt at most
 # once a day so completions for newly installed tools still get picked up.
