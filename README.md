@@ -27,6 +27,7 @@ in the way before creating a symlink.
 | `init.lua`, `lazy-lock.json` | `~/.config/nvim/`                  |
 | `git/ignore`              | `~/.config/git/ignore` (global gitignore) |
 | `hunk/config.toml`        | `~/.config/hunk/config.toml`         |
+| `scripts/usage-alerts`    | `~/.local/bin/usage-alerts`          |
 
 `kitty/sessions/*.kitty-session` are templates, not symlinks: `install.sh` copies
 any that are missing into `~/.local/state/kitty/sessions/`, which is what kitty
@@ -58,3 +59,31 @@ The repo is **public**, so secrets never get committed.
 - `.env.example` is the committed template — copy it to `.env` and fill in values.
 - `.zshrc` sources `.env` automatically, so any tool that interpolates `${VAR}`
   can read them.
+
+## Usage-limit reset alerts
+
+`usage-alerts` watches your Claude Code and Codex rate-limit windows. When a
+window you actually exhausted (100%) resets, it pings you on Telegram
+(`@irshad_macos_bot`) *and* posts a macOS notification, so you know you can get
+back to work.
+
+```sh
+usage-alerts status     # current windows + which resets are armed
+usage-alerts test       # verify Telegram + macOS delivery
+usage-alerts discover   # print Telegram chat ids the bot can see
+usage-alerts install    # (re)install the launchd agent
+usage-alerts uninstall  # remove it
+```
+
+A launchd agent (`com.irshath.usage-alerts`) runs `check` every 60s. That tick
+only reads local state and checks the clock, so alerts fire within a minute of a
+reset; the network is touched at most every 10 min (`POLL_INTERVAL`) to re-arm
+windows. State lives in `~/.local/state/usage-alerts/`, so a reset that happens
+while the Mac is asleep still alerts on wake. Logs are in
+`~/.local/state/usage-alerts/usage-alerts.log`.
+
+Data comes from the same places the tools use themselves: Claude's OAuth usage
+endpoint (token from the `Claude Code-credentials` keychain item) and the
+rate-limit snapshots Codex writes into `~/.codex/sessions/` as it runs.
+`codex app-server` is only spawned when no such snapshot exists yet. Telegram
+credentials live in `.env`.

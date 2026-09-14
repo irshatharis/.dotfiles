@@ -1,0 +1,722 @@
+#!/usr/bin/env python3
+"""Claude Code + Codex usage-limit reset alerts.
+
+Reads both providers' rate-limit state, remembers which windows were actually
+exhausted (100%), and fires a Telegram + macOS notification when such a window
+resets — so you know you can start working again.
+
+Data sources:
+- Claude Code: OAuth usage endpoint, token from the macOS keychain item
+  "Claude Code-credentials".
+- Codex: the newest rate-limit snapshot in the session rollouts under
+  ~/.codex/sessions, which Codex writes itself as it runs. That is free — no
+  network, no process — and is current as of the last turn. `codex app-server`
+  (`account/rateLimits/read`) is only spawned as a last resort when no rollout
+  data exists yet.
+
+A launchd agent (`usage-alerts install`) runs `check` every 60s. The reset time is
+known once a window is armed, so alerts fire off the clock in state, not off a
+fresh network call; usage is only refetched every 10 minutes (the Claude
+endpoint 429s if polled harder than that). State lives in
+~/.local/state/usage-alerts/state.json, so a reset that happens while the Mac is
+asleep still alerts on wake instead of being lost.
+
+CLI:
+  usage-alerts check      one poll; used by launchd (quiet unless it alerts/errors)
+  usage-alerts status     show current windows + tracked state
+  usage-alerts test       send a test alert to Telegram + macOS
+  usage-alerts discover   print Telegram chat ids seen by the bot
+  usage-alerts install    write + load the launchd agent (idempotent)
+  usage-alerts uninstall  unload + remove the launchd agent
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import plistlib
+import select
+import shutil
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime
+
+HOME = os.path.expanduser("~")
+DOTFILES = os.environ.get("DOTFILES_DIR") or os.path.join(HOME, ".dotfiles")
+ENV_FILE = os.path.join(DOTFILES, ".env")
+SCRIPT_PATH = os.path.realpath(__file__)
+
+STATE_DIR = os.path.join(HOME, ".local", "state", "usage-alerts")
+STATE_FILE = os.path.join(STATE_DIR, "state.json")
+LOG_FILE = os.path.join(STATE_DIR, "usage-alerts.log")
+LOCK_FILE = os.path.join(STATE_DIR, ".lock")
+
+PLIST_LABEL = "com.irshath.usage-alerts"
+PLIST_PATH = os.path.join(HOME, "Library", "LaunchAgents", PLIST_LABEL + ".plist")
+# The launchd agent fires every CHECK_INTERVAL seconds. A tick only touches the
+# network when POLL_INTERVAL has elapsed; otherwise it just checks the clock
+# against the reset times already in state. That matters because the Claude usage
+# endpoint rate-limits aggressively (it replies 429 with retry-after ~150s), and
+# once we know a window's reset timestamp we don't need to re-fetch to alert on
+# it. So: alert within a minute of the reset, without hammering the API.
+CHECK_INTERVAL = 60        # launchd StartInterval (clock check)
+POLL_INTERVAL = 600        # how often we actually refetch usage
+CLAUDE_429_BACKOFF = 300   # fallback backoff if the 429 omits retry-after
+
+KEYCHAIN_SERVICE = "Claude Code-credentials"
+CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+EXHAUSTED_PCT = 100.0
+
+WEEKDAY = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+# --------------------------------------------------------------------------- #
+# small helpers
+# --------------------------------------------------------------------------- #
+def log(msg: str) -> None:
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+
+
+def ensure_state_dir() -> None:
+    os.makedirs(STATE_DIR, exist_ok=True)
+
+
+def load_env() -> dict:
+    """Process env, with ~/.dotfiles/.env filling any gaps.
+
+    launchd runs with a bare environment, so the bot key/chat id come from the
+    file there. Real process env wins so you can override one-off.
+    """
+    vals = dict(os.environ)
+    try:
+        with open(ENV_FILE, "r") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[len("export "):]
+                if "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                val = val.strip()
+                if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+                    val = val[1:-1]
+                vals.setdefault(key.strip(), val)
+    except OSError:
+        pass
+    return vals
+
+
+def apple_escape(s: str) -> str:
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+# --------------------------------------------------------------------------- #
+# notifications
+# --------------------------------------------------------------------------- #
+def macos_notify(title: str, message: str, sound: str = "Glass") -> bool:
+    script = (
+        f'display notification "{apple_escape(message)}" '
+        f'with title "{apple_escape(title)}" sound name "{apple_escape(sound)}"'
+    )
+    try:
+        subprocess.run(["osascript", "-e", script], capture_output=True, timeout=15)
+        return True
+    except Exception as exc:  # pragma: no cover - best effort
+        log(f"macOS notification failed: {exc}")
+        return False
+
+
+def telegram_send(text: str, env: dict) -> bool:
+    token = env.get("IRSHAD_MACOS_BOT_TELEGRAM_API_KEY")
+    chat = env.get("IRSHAD_MACOS_BOT_TELEGRAM_CHAT_ID")
+    if not token or not chat:
+        log("telegram not configured (need IRSHAD_MACOS_BOT_TELEGRAM_API_KEY and _CHAT_ID)")
+        return False
+    data = urllib.parse.urlencode(
+        {"chat_id": chat, "text": text, "disable_web_page_preview": "true"}
+    ).encode()
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/sendMessage", data=data
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return bool(json.load(resp).get("ok"))
+    except Exception as exc:
+        log(f"telegram send failed: {exc}")
+        return False
+
+
+def notify_resets(events: list, env: dict) -> None:
+    """events: list of dicts with provider, label, resets_at, percent."""
+    lines = ["\U0001f514 Usage limit reset \u2014 you can continue"]
+    for ev in events:
+        when = datetime.fromtimestamp(ev["resets_at"]).astimezone().strftime("%-I:%M %p")
+        lines.append(f"\u2022 {ev['provider']} \u00b7 {ev['label']} (reset {when})")
+    body = "\n".join(lines)
+
+    if telegram_send(body, env):
+        log(f"telegram alert sent: {len(events)} window(s)")
+    macos_notify("Usage limit reset", "\n".join(l[2:] for l in lines[1:]) or body)
+    log("macOS alert sent: " + "; ".join(f"{e['provider']} {e['label']}" for e in events))
+
+
+# --------------------------------------------------------------------------- #
+# Claude Code
+# --------------------------------------------------------------------------- #
+def read_claude_token():
+    try:
+        out = subprocess.run(
+            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if out.returncode != 0:
+            return None
+        data = json.loads(out.stdout)
+        return (data.get("claudeAiOauth") or {}).get("accessToken")
+    except Exception:
+        return None
+
+
+def claude_window_label(kind: str) -> str:
+    mapping = {
+        "session": "5-hour session",
+        "weekly_all": "Weekly (all models)",
+        "weekly_opus": "Weekly (Opus)",
+        "weekly_sonnet": "Weekly (Sonnet)",
+    }
+    return mapping.get(kind, kind.replace("_", " ").capitalize())
+
+
+def _epoch(value):
+    """Accept ISO-8601 or unix seconds; return int seconds or None."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    try:
+        return int(datetime.fromisoformat(str(value)).timestamp())
+    except ValueError:
+        return None
+
+
+def claude_limits():
+    """Return (windows, error, retry_after_seconds)."""
+    token = read_claude_token()
+    if not token:
+        return [], "no Claude Code OAuth token in keychain", None
+    req = urllib.request.Request(
+        CLAUDE_USAGE_URL,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "anthropic-beta": "oauth-2025-04-20",
+            "User-Agent": "usage-alerts/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.load(resp)
+    except urllib.error.HTTPError as exc:
+        retry_after = None
+        try:
+            retry_after = int(exc.headers.get("Retry-After") or 0) or None
+        except (TypeError, ValueError):
+            pass
+        return [], f"claude usage request failed: HTTP {exc.code}", retry_after
+    except Exception as exc:
+        return [], f"claude usage request failed: {exc}", None
+
+    windows = []
+    limits = data.get("limits") or []
+    if limits:
+        for item in limits:
+            if not item:
+                continue
+            kind = item.get("kind") or item.get("group") or "limit"
+            windows.append({
+                "provider": "Claude Code",
+                "key": f"claude:{kind}",
+                "label": claude_window_label(kind),
+                "percent": float(item.get("percent") or 0),
+                "resets_at": _epoch(item.get("resets_at")),
+            })
+    else:  # older payloads: five_hour / seven_day objects
+        for api_key, label in (("five_hour", "5-hour session"), ("seven_day", "Weekly")):
+            win = data.get(api_key)
+            if isinstance(win, dict):
+                windows.append({
+                    "provider": "Claude Code",
+                    "key": f"claude:{api_key}",
+                    "label": label,
+                    "percent": float(win.get("utilization") or 0),
+                    "resets_at": _epoch(win.get("resets_at")),
+                })
+    return windows, None, None
+
+
+# --------------------------------------------------------------------------- #
+# Codex
+# --------------------------------------------------------------------------- #
+def find_codex():
+    """Locate the codex binary even when launchd's PATH is minimal."""
+    found = shutil.which("codex")
+    if found:
+        return found
+    for candidate in (
+        "/opt/homebrew/bin/codex",
+        "/usr/local/bin/codex",
+        os.path.join(HOME, ".local", "bin", "codex"),
+    ):
+        if os.path.exists(candidate):
+            return candidate
+    return "codex"  # last resort: let Popen raise a clear error
+
+
+def _codex_rpc(method: str, params: dict, timeout: float = 25.0):
+    """Send one request to a throwaway `codex app-server` over stdio."""
+    proc = subprocess.Popen(
+        [find_codex(), "app-server"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        text=True, bufsize=1,
+    )
+    try:
+        for msg in (
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"clientInfo": {"name": "usage-alerts", "version": "1.0.0"}}},
+            {"jsonrpc": "2.0", "method": "initialized", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": method, "params": params},
+        ):
+            proc.stdin.write(json.dumps(msg) + "\n")
+        proc.stdin.flush()
+
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            ready, _, _ = select.select([proc.stdout], [], [], remaining)
+            if not ready:
+                return None
+            line = proc.stdout.readline()
+            if not line:
+                return None
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if obj.get("id") == 2:
+                if "error" in obj:
+                    raise RuntimeError(str(obj["error"]))
+                return obj.get("result")
+    finally:
+        proc.kill()
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+
+
+def _pick(mapping: dict, *keys, default=None):
+    """First present, non-null value among `keys` (app-server is camelCase,
+    session rollouts are snake_case)."""
+    for key in keys:
+        if mapping.get(key) is not None:
+            return mapping[key]
+    return default
+
+
+def _codex_windows_from_snapshot(snap: dict) -> list:
+    if not snap:
+        return []
+    windows = []
+    for field, fallback in (("primary", "5-hour"), ("secondary", "Weekly")):
+        win = snap.get(field)
+        if not win:
+            continue
+        mins = _pick(win, "windowDurationMins", "window_minutes")
+        label = f"{int(mins) // 60}-hour" if mins and mins < 1440 else (
+            "Weekly" if mins else fallback
+        )
+        windows.append({
+            "provider": "Codex",
+            "key": f"codex:{field}",
+            "label": label,
+            "percent": float(_pick(win, "usedPercent", "used_percent", default=0) or 0),
+            "resets_at": _epoch(_pick(win, "resetsAt", "resets_at")),
+        })
+    return windows
+
+
+def _last_snapshot_in_file(path: str, tail_bytes: int = 512 * 1024):
+    """Newest non-null rate_limits bucket in one rollout file.
+
+    Codex appends a null rate_limits once a window is exhausted, so we keep the
+    newest snapshot that actually carries a bucket. Reading only the tail keeps
+    this cheap even for 10 MB+ sessions; if the tail holds no bucket (e.g. a
+    long run of nulls), fall back to a full read so nothing is missed.
+    """
+    def scan(lines):
+        last = None
+        for raw in lines:
+            if b'"rate_limits"' not in raw:
+                continue
+            try:
+                obj = json.loads(raw)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            payload = obj.get("payload") or {}
+            snap = payload.get("rate_limits") if isinstance(payload, dict) else None
+            if snap and (snap.get("primary") or snap.get("secondary")):
+                last = snap
+        return last
+
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            if size > tail_bytes:
+                fh.seek(size - tail_bytes)
+                fh.readline()  # drop the partial line the seek landed in
+                snap = scan(fh.read().splitlines())
+                if snap is not None:
+                    return snap
+                fh.seek(0)
+            return scan(fh.read().splitlines())
+    except OSError:
+        return None
+
+
+def _codex_limits_from_rollout(max_files: int = 30):
+    """Recover the last known Codex snapshot from session rollouts.
+
+    The newest file is often a session still being written with no token_count
+    event yet, so walk files newest-first until one carries rate limits.
+    """
+    root = os.path.join(HOME, ".codex", "sessions")
+    files = []
+    for dirpath, _dirs, names in os.walk(root):
+        for name in names:
+            if name.endswith(".jsonl"):
+                path = os.path.join(dirpath, name)
+                try:
+                    files.append((os.path.getmtime(path), path))
+                except OSError:
+                    continue
+    files.sort(reverse=True)
+
+    for _mtime, path in files[:max_files]:
+        snap = _last_snapshot_in_file(path)
+        if snap:
+            return _codex_windows_from_snapshot(snap)
+    return []
+
+
+def codex_limits():
+    """Rollout files first: local, free, and current as of Codex's last turn.
+
+    `codex app-server` is only spawned when there is no rollout data at all
+    (fresh install / never run), so the steady state costs one cheap file read.
+    """
+    windows = _codex_limits_from_rollout()
+    if windows:
+        return windows, None
+    try:
+        result = _codex_rpc("account/rateLimits/read", {})
+        snap = (result or {}).get("rateLimits")
+        if snap:
+            return _codex_windows_from_snapshot(snap), None
+    except Exception as exc:
+        log(f"codex app-server fallback failed: {exc}")
+    return [], "no Codex rate-limit data (no rollouts and app-server unavailable)"
+
+
+# --------------------------------------------------------------------------- #
+# state + polling
+# --------------------------------------------------------------------------- #
+def read_state() -> dict:
+    try:
+        with open(STATE_FILE) as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {"version": 1, "windows": {}}
+
+
+def write_state(state: dict) -> None:
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(state, fh, indent=2, sort_keys=True)
+    os.replace(tmp, STATE_FILE)
+
+
+def collect_windows(state: dict, now: int):
+    """Fetch both providers, honouring Claude's 429 backoff.
+
+    Mutates `state` in place only to record/clear the backoff deadline.
+    """
+    windows, errors = [], []
+
+    if now < state.get("claude_backoff_until", 0):
+        errors.append("Claude poll skipped (backoff after rate limit)")
+    else:
+        got, err, retry_after = claude_limits()
+        windows.extend(got)
+        if err:
+            errors.append(err)
+            state["claude_backoff_until"] = now + (retry_after or CLAUDE_429_BACKOFF)
+        else:
+            state.pop("claude_backoff_until", None)
+
+    got, err = codex_limits()
+    windows.extend(got)
+    if err:
+        errors.append(err)
+    return windows, errors
+
+
+def rotate_log_if_big(max_bytes: int = 1_000_000) -> None:
+    try:
+        if os.path.getsize(LOG_FILE) > max_bytes:
+            os.replace(LOG_FILE, LOG_FILE + ".1")
+    except OSError:
+        pass
+
+
+def cmd_check(_args) -> int:
+    ensure_state_dir()
+    rotate_log_if_big()
+
+    # Single-flight: if a previous poll is still running, skip this tick.
+    lock = open(LOCK_FILE, "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return 0
+
+    now = int(time.time())
+    state = read_state()
+    stored = state.get("windows", {})
+
+    # Anything we saw exhausted whose reset time has now passed is due an alert.
+    # This is computed from *stored* timestamps, so the alert does not depend on
+    # a network call landing at the right moment.
+    due = [
+        (key, win) for key, win in stored.items()
+        if win.get("exhausted")
+        and win.get("resets_at")
+        and now >= win["resets_at"]
+        and win.get("notified_for") != win["resets_at"]
+    ]
+
+    # Refetch on a slow, API-friendly cadence. The clock alone drives alerts, so
+    # a missed/failed fetch only delays re-arming, never the alert itself.
+    errors, events = [], []
+    last_poll = state.get("last_poll_at", 0)
+    if not last_poll or now - last_poll >= POLL_INTERVAL:
+        windows, errors = collect_windows(state, now)
+        for err in errors:
+            log(f"warning: {err}")
+        for win in windows:
+            prev = stored.get(win["key"], {})
+            stored[win["key"]] = {
+                "provider": win["provider"],
+                "label": win["label"],
+                "percent": win["percent"],
+                "resets_at": win["resets_at"],
+                "last_seen": now,
+                "notified_for": prev.get("notified_for"),
+                # Only a window actually at 100% counts; Codex's global
+                # rateLimitReachedType flag is true whenever *any* window is
+                # blocked, so trusting it would wrongly arm the weekly window.
+                # A future reset is also required: Codex data is the last
+                # snapshot it wrote, so one whose reset already passed is stale
+                # and must not arm a spurious alert.
+                "exhausted": (
+                    win["percent"] >= EXHAUSTED_PCT
+                    and (win["resets_at"] or 0) > now
+                ),
+            }
+        state["last_poll_at"] = now
+
+    for key, win in due:
+        events.append({
+            "provider": win["provider"],
+            "label": win["label"],
+            "resets_at": win["resets_at"],
+            "percent": win.get("percent", EXHAUSTED_PCT),
+        })
+        entry = stored.setdefault(key, dict(win))
+        entry["notified_for"] = win["resets_at"]
+        # Disarm the window we just announced, unless a refetch already found a
+        # fresh exhausted window in the gap (new reset time) — keep that armed.
+        if entry.get("resets_at") == win["resets_at"] or entry.get("percent", 0) < EXHAUSTED_PCT:
+            entry["exhausted"] = False
+
+    state["windows"] = stored
+    state["last_run"] = now
+    state["last_errors"] = errors
+    write_state(state)
+
+    if events:
+        notify_resets(events, load_env())
+    elif errors:
+        log("poll completed with warnings")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# status / test / discover
+# --------------------------------------------------------------------------- #
+def fmt_reset(ts) -> str:
+    if not ts:
+        return "-"
+    dt = datetime.fromtimestamp(ts).astimezone()
+    days = (dt.date() - datetime.now().astimezone().date()).days
+    clock = dt.strftime("%-I:%M %p")
+    if days == 0:
+        return f"today {clock}"
+    if days == 1:
+        return f"tomorrow {clock}"
+    return f"{WEEKDAY[dt.weekday()]} {clock}"
+
+
+def cmd_status(_args) -> int:
+    state = read_state()
+    windows, errors = collect_windows(state, int(time.time()))
+    stored = state.get("windows", {})
+
+    print("Live usage windows")
+    if not windows:
+        print("  (none)")
+    for win in windows:
+        reset = fmt_reset(win["resets_at"])
+        flag = "  EXHAUSTED" if win["percent"] >= EXHAUSTED_PCT else ""
+        print(f"  {win['provider']:<12} {win['label']:<24} {win['percent']:>5.0f}%   resets {reset}{flag}")
+
+    print("\nAlerting state")
+    tracked = [w for w in stored.values() if w.get("exhausted")]
+    if not tracked:
+        print("  nothing exhausted; no reset alerts pending")
+    for win in tracked:
+        print(f"  armed: {win['provider']} {win['label']} -> alert at {fmt_reset(win.get('resets_at'))}")
+
+    last = state.get("last_run")
+    if last:
+        print(f"\nLast poll: {fmt_reset(last)}")
+    for err in (errors or state.get("last_errors", [])):
+        print(f"  warning: {err}")
+    return 0
+
+
+def cmd_test(_args) -> int:
+    env = load_env()
+    now = int(time.time())
+    body = (
+        "\U0001f514 Usage limit reset \u2014 you can continue\n"
+        f"\u2022 Test alert (sent {datetime.fromtimestamp(now).astimezone().strftime('%-I:%M %p')})"
+    )
+    ok_tg = telegram_send(body, env)
+    ok_mac = macos_notify("Usage limit reset", "Test alert \u2014 notifications are working")
+    print(f"telegram: {'ok' if ok_tg else 'failed'}")
+    print(f"macos:    {'ok' if ok_mac else 'failed'}")
+    return 0 if (ok_tg and ok_mac) else 1
+
+
+def cmd_discover(_args) -> int:
+    env = load_env()
+    token = env.get("IRSHAD_MACOS_BOT_TELEGRAM_API_KEY")
+    if not token:
+        print("IRSHAD_MACOS_BOT_TELEGRAM_API_KEY not set", file=sys.stderr)
+        return 1
+    with urllib.request.urlopen(
+        f"https://api.telegram.org/bot{token}/getUpdates", timeout=20
+    ) as resp:
+        data = json.load(resp)
+    seen = {}
+    for update in data.get("result", []):
+        for field in ("message", "edited_message", "channel_post", "my_chat_member"):
+            chat = (update.get(field) or {}).get("chat")
+            if chat:
+                name = chat.get("first_name") or chat.get("username") or chat.get("title") or ""
+                seen[chat["id"]] = f"{chat.get('type')}: {name}".strip(": ")
+    if not seen:
+        print("no chats found \u2014 send the bot a message first, then retry")
+        return 1
+    for chat_id, desc in seen.items():
+        print(f"{chat_id}\t{desc}")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# launchd lifecycle
+# --------------------------------------------------------------------------- #
+def _launchctl(*args) -> int:
+    return subprocess.run(["launchctl", *args], capture_output=True, text=True).returncode
+
+
+def cmd_install(_args) -> int:
+    ensure_state_dir()
+    os.makedirs(os.path.dirname(PLIST_PATH), exist_ok=True)
+    plist = {
+        "Label": PLIST_LABEL,
+        "ProgramArguments": [sys.executable, SCRIPT_PATH, "check"],
+        "RunAtLoad": True,
+        "StartInterval": CHECK_INTERVAL,
+        "ProcessType": "Background",
+        "StandardOutPath": LOG_FILE,
+        "StandardErrorPath": LOG_FILE,
+        # launchd's default PATH lacks Homebrew, where `codex` usually lives.
+        "EnvironmentVariables": {
+            "PATH": os.environ.get("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
+        },
+    }
+    with open(PLIST_PATH, "wb") as fh:
+        plistlib.dump(plist, fh)
+
+    domain = f"gui/{os.getuid()}"
+    _launchctl("bootout", f"{domain}/{PLIST_LABEL}")  # ignore if not loaded
+    if _launchctl("bootstrap", domain, PLIST_PATH) != 0:
+        _launchctl("load", "-w", PLIST_PATH)  # older launchctl
+    _launchctl("enable", f"{domain}/{PLIST_LABEL}")
+    print(f"installed {PLIST_LABEL}")
+    print(f"  plist:    {PLIST_PATH}")
+    print(f"  interval: every {CHECK_INTERVAL}s")
+    print(f"  logs:     {LOG_FILE}")
+    return 0
+
+
+def cmd_uninstall(_args) -> int:
+    domain = f"gui/{os.getuid()}"
+    _launchctl("bootout", f"{domain}/{PLIST_LABEL}")
+    try:
+        os.remove(PLIST_PATH)
+    except FileNotFoundError:
+        pass
+    print(f"uninstalled {PLIST_LABEL}")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(prog="usage-alerts", description=__doc__.splitlines()[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+    for name, fn, help_text in (
+        ("check", cmd_check, "run one poll (used by launchd)"),
+        ("status", cmd_status, "show current windows and alert state"),
+        ("test", cmd_test, "send a test alert to Telegram and macOS"),
+        ("discover", cmd_discover, "print Telegram chat ids seen by the bot"),
+        ("install", cmd_install, "install + load the launchd agent"),
+        ("uninstall", cmd_uninstall, "unload + remove the launchd agent"),
+    ):
+        p = sub.add_parser(name, help=help_text)
+        p.set_defaults(func=fn)
+    args = parser.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

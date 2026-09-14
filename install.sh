@@ -71,6 +71,14 @@ symlink "git/ignore"    "$HOME/.config/git/ignore"
 echo "==> hunk (TUI git diff viewer)"
 symlink "hunk/config.toml" "$HOME/.config/hunk/config.toml"
 
+echo "==> usage-limit reset alerts (Claude Code + Codex)"
+symlink "scripts/usage-alerts" "$HOME/.local/bin/usage-alerts"
+if [[ -n "${SKIP_USAGE_ALERTS:-}" ]]; then
+  echo "skip: usage-alerts launchd agent (SKIP_USAGE_ALERTS set)"
+else
+  python3 "$DOTFILES/scripts/usage-alerts" install
+fi
+
 echo "==> secrets"
 if [[ ! -f "$DOTFILES/.env" ]]; then
   cp "$DOTFILES/.env.example" "$DOTFILES/.env"
