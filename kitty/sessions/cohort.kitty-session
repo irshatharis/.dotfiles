@@ -1,0 +1,20 @@
+new_tab
+layout stack
+cd /Users/irshath/projects/cohort
+launch --hold nvim .
+focus
+
+new_tab
+layout stack
+cd /Users/irshath/projects/cohort
+launch --hold claude
+
+new_tab
+layout grid
+cd /Users/irshath/projects/cohort
+launch
+
+new_tab
+layout grid
+cd /Users/irshath/projects/cohort
+launch

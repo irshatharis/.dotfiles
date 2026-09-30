@@ -6,7 +6,7 @@ Personal macOS dotfiles. Config lives here and is symlinked into place by
 ## Install
 
 ```sh
-git clone git@github.com:irshathcodes/.dotfiles.git ~/.dotfiles
+git clone git@github.com:irshatharis/.dotfiles.git ~/.dotfiles
 cd ~/.dotfiles
 ./install.sh
 cp .env.example .env && chmod 600 .env   # then fill in real secrets

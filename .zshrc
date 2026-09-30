@@ -237,3 +237,6 @@ if [ -f '/Users/irshath/projects/buildkit/google-cloud-sdk/path.zsh.inc' ]; then
 
 # The next line enables shell command completion for gcloud.
 if [ -f '/Users/irshath/projects/buildkit/google-cloud-sdk/completion.zsh.inc' ]; then . '/Users/irshath/projects/buildkit/google-cloud-sdk/completion.zsh.inc'; fi
+
+# opencode
+export PATH=/Users/irshath/.opencode/bin:$PATH

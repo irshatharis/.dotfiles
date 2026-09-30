@@ -12,18 +12,33 @@
       "CronDelete",
       "CronList",
       "EnterPlanMode",
-      "ExitPlanMode"
+      "ExitPlanMode",
+      "Workflow",
+      "ShareOnboardingGuide",
+      "SendFeedback"
     ],
     "defaultMode": "bypassPermissions"
   },
-  "model": "opus[1m]",
+  "model": "opus",
   "disableClaudeAiConnectors": true,
   "disableBundledSkills": true,
   "disableRemoteControl": true,
   "disableArtifact": true,
   "effortLevel": "high",
+  "modelSettings": {
+    "claude-opus-5": {
+      "effortLevel": "high"
+    },
+    "claude-fable-5-1": {
+      "effortLevel": "xhigh"
+    },
+    "claude-opus-5-5": {
+      "effortLevel": "high"
+    }
+  },
+  "autoCompactWindow": 400000,
+  "tui": "default",
   "skipDangerousModePermissionPrompt": true,
   "theme": "dark",
-  "autoCompactEnabled": true,
-  "autoCompactWindow": 400000
+  "autoCompactEnabled": true
 }
