@@ -2,7 +2,7 @@
 # Set as git's pager and difftool in gitconfig, so `git diff` / `git show` /
 # `git difftool` all land here.
 
-# Match neovim (rebelot/kanagawa.nvim) and the kitty theme.
+# Match neovim (rebelot/kanagawa.nvim).
 theme = "kanagawa-wave"
 
 # Side-by-side always, rather than "auto" (which falls back to stacked on

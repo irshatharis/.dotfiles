@@ -34,32 +34,11 @@ symlink ".zshrc"        "$HOME/.zshrc"
 symlink ".zsh_aliases"  "$HOME/.zsh_aliases"
 symlink ".gitconfig"    "$HOME/.gitconfig"
 
-echo "==> kitty"
-symlink "kitty"         "$HOME/.config/kitty"
-
-# Seed the live kitty session files from the templates in kitty/sessions/, so
-# `cmd+j <letter>` and startup_session always have a file to open on a fresh
-# machine. COPIES, not symlinks: cmd+shift+s (save_as_session) writes over the
-# live file, and that must not dirty this repo. An existing file is left alone —
-# it is your saved layout and outranks the template.
-SESSION_DIR="$HOME/.local/state/kitty/sessions"
-mkdir -p "$SESSION_DIR"
-for f in "$DOTFILES"/kitty/sessions/*.kitty-session; do
-  dst="$SESSION_DIR/$(basename "$f")"
-  if [[ -e "$dst" ]]; then
-    echo "ok:   $dst (keeping saved layout)"
-  else
-    cp "$f" "$dst"
-    echo "seed: $dst"
-  fi
-done
-
 echo "==> karabiner"
 symlink "karabiner-elements.json" "$HOME/.config/karabiner/karabiner.json"
 
 echo "==> claude code (settings.json is shareable config; auth/tokens stay local)"
 symlink "claude/settings.json" "$HOME/.claude/settings.json"
-symlink "claude/hooks/agent-panel-state.py" "$HOME/.claude/hooks/agent-panel-state.py"
 
 echo "==> neovim"
 symlink "init.lua"       "$HOME/.config/nvim/init.lua"
@@ -93,5 +72,4 @@ cat <<EOF
 
 Done.
 - Secrets live in $DOTFILES/.env (gitignored). .zshrc sources it automatically.
-- kitty sessions live in $SESSION_DIR (seeded from kitty/sessions/).
 EOF

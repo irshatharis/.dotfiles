@@ -23,7 +23,7 @@ git_prompt_info() {
   if [[ -z $gitdir ]] || ! { read -r ref < $gitdir/HEAD } 2>/dev/null; then
     vcs_info_msg_0_=""; return
   fi
-  if [[ $ref == ref:* ]]; then vcs_info_msg_0_=" (${ref##*/})"
+  if [[ $ref == ref:* ]]; then vcs_info_msg_0_=" (${ref#ref: refs/heads/})"
   else vcs_info_msg_0_=" (${ref[1,7]})"; fi   # detached HEAD: short sha
 }
 precmd() { git_prompt_info }
@@ -232,11 +232,11 @@ export PATH="$PYENV_ROOT/plugins/pyenv-virtualenv/shims:$PATH"
 
 export PATH="$HOME/.local/bin:$PATH"
 
-# The next line updates PATH for the Google Cloud SDK.
-if [ -f '/Users/irshath/projects/buildkit/google-cloud-sdk/path.zsh.inc' ]; then . '/Users/irshath/projects/buildkit/google-cloud-sdk/path.zsh.inc'; fi
-
-# The next line enables shell command completion for gcloud.
-if [ -f '/Users/irshath/projects/buildkit/google-cloud-sdk/completion.zsh.inc' ]; then . '/Users/irshath/projects/buildkit/google-cloud-sdk/completion.zsh.inc'; fi
-
 # opencode
 export PATH=/Users/irshath/.opencode/bin:$PATH
+
+# The next line updates PATH for the Google Cloud SDK.
+if [ -f '/Users/irshath/Downloads/google-cloud-sdk/path.zsh.inc' ]; then . '/Users/irshath/Downloads/google-cloud-sdk/path.zsh.inc'; fi
+
+# The next line enables shell command completion for gcloud.
+if [ -f '/Users/irshath/Downloads/google-cloud-sdk/completion.zsh.inc' ]; then . '/Users/irshath/Downloads/google-cloud-sdk/completion.zsh.inc'; fi

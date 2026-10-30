@@ -22,34 +22,11 @@ in the way before creating a symlink.
 | `.zshrc`                  | `~/.zshrc`                            |
 | `.zsh_aliases`            | `~/.zsh_aliases`                     |
 | `.gitconfig`              | `~/.gitconfig`                       |
-| `kitty/`                  | `~/.config/kitty`                    |
 | `karabiner-elements.json` | `~/.config/karabiner/karabiner.json` |
 | `init.lua`, `lazy-lock.json` | `~/.config/nvim/`                  |
 | `git/ignore`              | `~/.config/git/ignore` (global gitignore) |
 | `hunk/config.toml`        | `~/.config/hunk/config.toml`         |
 | `scripts/usage-alerts`    | `~/.local/bin/usage-alerts`          |
-
-`kitty/sessions/*.kitty-session` are templates, not symlinks: `install.sh` copies
-any that are missing into `~/.local/state/kitty/sessions/`, which is what kitty
-actually loads. `cmd+shift+s` saves the live layout over the copy there, so
-rearranging tabs never dirties this repo.
-
-## Sessions
-
-`cmd+j` is the leader for switching sessions, all local to this Mac:
-
-| Key            | Session                        |
-|----------------|--------------------------------|
-| `cmd+j` `b`    | buildkit (`~/projects/buildkit`) |
-| `cmd+j` `u`    | ui                             |
-| `cmd+j` `d`    | default (`~`)                  |
-| `cmd+j` `[`    | previous session               |
-| `cmd+j` `/`    | fuzzy-pick an open session     |
-| `cmd+j` `o`    | new session (project or scratch) |
-
-Each project session is 4 tabs: nvim and claude (stacked), a server pane and a
-shell (grid). `cmd+shift+s` persists the current tabs/splits/layouts/cwds — and
-the programs running in them — back to the session file.
 
 ## Secrets
 

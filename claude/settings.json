@@ -19,11 +19,21 @@
     ],
     "defaultMode": "bypassPermissions"
   },
-  "model": "opus",
+  "model": "opus[1m]",
   "disableClaudeAiConnectors": true,
   "disableBundledSkills": true,
   "disableRemoteControl": true,
-  "disableArtifact": true,
+  "enabledPlugins": {
+    "pstack@cursor-plugins": true
+  },
+  "extraKnownMarketplaces": {
+    "cursor-plugins": {
+      "source": {
+        "source": "github",
+        "repo": "cursor/plugins"
+      }
+    }
+  },
   "effortLevel": "high",
   "modelSettings": {
     "claude-opus-5": {
@@ -40,5 +50,19 @@
   "tui": "default",
   "skipDangerousModePermissionPrompt": true,
   "theme": "dark",
-  "autoCompactEnabled": true
+  "autoCompactEnabled": true,
+  "idleCompaction": false,
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/bin/sh -c 'rex __internal session-start --agent claude --feature-session-naming=false 2>/dev/null || true'",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
 }
