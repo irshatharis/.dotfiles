@@ -22,6 +22,7 @@ in the way before creating a symlink.
 | `.zshrc`                  | `~/.zshrc`                            |
 | `.zsh_aliases`            | `~/.zsh_aliases`                     |
 | `.gitconfig`              | `~/.gitconfig`                       |
+| `rex/`                    | `~/.config/rex`                      |
 | `karabiner-elements.json` | `~/.config/karabiner/karabiner.json` |
 | `init.lua`, `lazy-lock.json` | `~/.config/nvim/`                  |
 | `git/ignore`              | `~/.config/git/ignore` (global gitignore) |

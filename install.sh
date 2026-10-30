@@ -34,6 +34,9 @@ symlink ".zshrc"        "$HOME/.zshrc"
 symlink ".zsh_aliases"  "$HOME/.zsh_aliases"
 symlink ".gitconfig"    "$HOME/.gitconfig"
 
+echo "==> rex"
+symlink "rex"           "$HOME/.config/rex"
+
 echo "==> karabiner"
 symlink "karabiner-elements.json" "$HOME/.config/karabiner/karabiner.json"
 
