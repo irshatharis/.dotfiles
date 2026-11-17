@@ -60,12 +60,15 @@
     },
     "claude-sonnet-5-5": {
       "effortLevel": "medium"
+    },
+    "claude-fable-5-2": {
+      "effortLevel": "high"
     }
   },
   "autoCompactWindow": 400000,
   "tui": "default",
   "skipDangerousModePermissionPrompt": true,
-  "theme": "dark",
+  "theme": "auto",
   "autoCompactEnabled": true,
   "idleCompaction": false,
   "autoContinueAtUsageLimit": true
