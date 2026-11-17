@@ -1,611 +1,985 @@
+-- Byte-compile and cache Lua modules in ~/.cache/nvim/luac (lazy.nvim did this for us)
+vim.loader.enable()
+
 vim.g.loaded_netrw = 1
 vim.g.loaded_netrwPlugin = 1
 
-vim.o.sessionoptions = "blank,buffers,curdir,folds,help,tabpages,winsize,winpos,terminal,localoptions"
+vim.o.sessionoptions = "buffers,curdir,folds,help,tabpages,winsize,winpos,terminal,localoptions"
 
 vim.o.confirm = true
-
--- Bootstrap Lazy package manager
-local lazypath = vim.fn.stdpath("data") .. "/lazy/lazy.nvim"
-if not vim.uv.fs_stat(lazypath) then
-	vim.fn.system({
-		"git",
-		"clone",
-		"--filter=blob:none",
-		"https://github.com/folke/lazy.nvim.git",
-		"--branch=stable",
-		lazypath,
-	})
-end
-vim.opt.rtp:prepend(lazypath)
 
 -- Leader key must be set before plugins
 vim.g.mapleader = " "
 vim.g.maplocalleader = " "
 
--- Plugin configuration
+-- Rounded borders for every floating window (hover, diagnostics, signature help, mason)
+vim.o.winborder = "rounded"
+-- New message UI (0.12, experimental): long messages and errors expand the
+-- command line briefly instead of blocking on "Press ENTER to continue"
+require("vim._core.ui2").enable({})
+
+-- Plugins (built-in vim.pack manager; lockfile is nvim-pack-lock.json)
+-- Update: :lua vim.pack.update()   Remove: :lua vim.pack.del({ "name" })
 -- plugin start
-require("lazy").setup({
-	-- Colorscheme
-	{
-		"rebelot/kanagawa.nvim",
-		lazy = false,
-		priority = 1000,
-		config = function(_, _opts)
-			require("kanagawa").setup({
-				keywordStyle = { italic = false },
-				statementStyle = { bold = false },
-				commentStyle = { italic = false },
-				functionStyle = { bold = false },
-			})
-			vim.cmd.colorscheme("kanagawa")
+
+-- Rebuild treesitter parsers whenever nvim-treesitter itself is updated
+vim.api.nvim_create_autocmd("PackChanged", {
+	group = vim.api.nvim_create_augroup("pack-hooks", { clear = true }),
+	callback = function(ev)
+		if ev.data.spec.name == "nvim-treesitter" and ev.data.kind == "update" then
+			if not ev.data.active then
+				vim.cmd.packadd("nvim-treesitter")
+			end
+			vim.cmd("TSUpdate")
+		end
+	end,
+})
+
+local gh = function(repo)
+	return "https://github.com/" .. repo
+end
+
+-- Sets up a plugin right after the first screen is drawn (lazy.nvim's VeryLazy),
+-- for plugins the first screen doesn't need. They attach to the buffers that are
+-- already open, including ones auto-session restored.
+local function after_startup(fn)
+	if vim.v.vim_did_enter == 1 then
+		return fn()
+	end
+	vim.api.nvim_create_autocmd("VimEnter", {
+		group = vim.api.nvim_create_augroup("after-startup", { clear = false }),
+		once = true,
+		callback = function()
+			vim.schedule(fn)
 		end,
-	},
+	})
+end
 
-	-- Treesitter for better syntax highlighting
-	{
-		"nvim-treesitter/nvim-treesitter",
-		build = ":TSUpdate",
-		opts = {
-			ensure_installed = {
-				"lua",
-				"vim",
-				"vimdoc",
-				"query",
-				"javascript",
-				"typescript",
-				"tsx",
-				"json",
-				"html",
-				"css",
-				"bash",
-				"rust",
-				"toml",
-				"go",
-				"gomod",
-				"gosum",
-				"gowork",
-			},
-			sync_install = false,
-			auto_install = true,
-			highlight = {
-				enable = true,
-				additional_vim_regex_highlighting = false,
-			},
-			indent = { enable = true },
-		},
-		config = function(_, opts)
-			require("nvim-treesitter.configs").setup(opts)
+vim.pack.add({
+	gh("rebelot/kanagawa.nvim"),
+	gh("projekt0n/github-nvim-theme"),
+	{ src = gh("nvim-treesitter/nvim-treesitter"), version = "main" },
+	gh("windwp/nvim-autopairs"),
+	gh("nvim-lua/plenary.nvim"), -- required by harpoon
+	{ src = gh("ThePrimeagen/harpoon"), version = "harpoon2" },
+	gh("mason-org/mason.nvim"),
+	gh("mason-org/mason-lspconfig.nvim"),
+	gh("neovim/nvim-lspconfig"),
+	gh("folke/which-key.nvim"),
+	{ src = gh("saghen/blink.cmp"), version = vim.version.range("1") },
+	gh("stevearc/conform.nvim"),
+	gh("lewis6991/gitsigns.nvim"),
+	gh("nvim-tree/nvim-web-devicons"),
+	gh("MeanderingProgrammer/render-markdown.nvim"),
+	gh("nvim-lualine/lualine.nvim"),
+	gh("stevearc/oil.nvim"),
+	gh("folke/snacks.nvim"),
+	gh("rmagatti/auto-session"),
+})
+
+-- Built-in optional plugins
+vim.cmd.packadd("nvim.undotree")
+
+-- Colorscheme
+require("kanagawa").setup({
+	keywordStyle = { italic = false },
+	statementStyle = { bold = false },
+	commentStyle = { italic = false },
+	functionStyle = { bold = false },
+})
+
+-- Dark: kanagawa wave. Light: github light (instead of kanagawa lotus).
+local function apply_theme()
+	if vim.o.background == "light" then
+		vim.cmd.colorscheme("github_light")
+	else
+		vim.cmd.colorscheme("kanagawa-wave")
+	end
+end
+apply_theme()
+
+-- Follow terminal light/dark changes detected after startup
+vim.api.nvim_create_autocmd("OptionSet", {
+	pattern = "background",
+	group = vim.api.nvim_create_augroup("theme-switch", { clear = true }),
+	nested = true, -- let ColorScheme autocmds (lualine, markdown colors) run on the switch
+	callback = apply_theme,
+})
+
+-- Treesitter: nvim-treesitter (main branch) only installs parsers and queries.
+-- Highlighting, folding and incremental selection are built into Neovim.
+do
+	local ts = require("nvim-treesitter")
+	ts.install({
+		"lua",
+		"vim",
+		"vimdoc",
+		"query",
+		"markdown",
+		"markdown_inline",
+		"javascript",
+		"typescript",
+		"tsx",
+		"json",
+		"html",
+		"css",
+		"bash",
+		"rust",
+		"toml",
+		"yaml",
+		"regex",
+		"go",
+		"gomod",
+		"gosum",
+		"gowork",
+	})
+
+	local function start(buf, lang)
+		if not vim.api.nvim_buf_is_valid(buf) or not pcall(vim.treesitter.start, buf, lang) then
+			return
+		end
+		if vim.treesitter.query.get(lang, "indents") then
+			vim.bo[buf].indentexpr = "v:lua.require'nvim-treesitter'.indentexpr()"
+		end
+	end
+
+	-- Start treesitter for every filetype with a parser, installing missing ones on demand
+	vim.api.nvim_create_autocmd("FileType", {
+		group = vim.api.nvim_create_augroup("treesitter-start", { clear = true }),
+		callback = function(ev)
+			local lang = vim.treesitter.language.get_lang(ev.match)
+			if not lang then
+				return
+			end
+			if vim.treesitter.language.add(lang) then
+				start(ev.buf, lang)
+			elseif vim.list_contains(ts.get_available(), lang) then
+				ts.install(lang):await(function()
+					vim.schedule(function()
+						start(ev.buf, lang)
+					end)
+				end)
+			end
 		end,
+	})
+end
+
+-- Markdown rendering in the buffer: rendered in every mode so switching modes
+-- never shifts the layout. <leader>m toggles between rendered and raw source.
+-- Styled after Obsidian: plain bold headings with breathing room, muted list
+-- markers, a tick for done tasks, and a centered reading column.
+require("render-markdown").setup({
+	render_modes = true,
+	latex = { enabled = false },
+	anti_conceal = { enabled = false },
+	heading = {
+		sign = false,
+		icons = { "" },
+		position = "inline",
+		width = "block",
+		backgrounds = {},
+		-- Blank space above and below headings (reuses existing empty lines)
+		border = true,
+		above = " ",
+		below = " ",
 	},
-
-	-- Auto pairs for brackets, quotes, etc.
-	{
-		"windwp/nvim-autopairs",
-		event = "InsertEnter",
-		opts = {},
+	bullet = {
+		icons = { "•" },
+		highlight = "RenderMarkdownBullet",
 	},
-
-	-- Easy commenting
-	{
-		"numToStr/Comment.nvim",
-		opts = {},
-	},
-
-	-- Surround text objects: ys / cs / ds
-	{
-		"kylechui/nvim-surround",
-		version = "*",
-		event = "VeryLazy",
-		opts = {},
-	},
-
-	{
-		"ThePrimeagen/harpoon",
-		branch = "harpoon2",
-		dependencies = { "nvim-lua/plenary.nvim" },
-		config = function()
-			local harpoon = require("harpoon")
-			harpoon.setup()
-
-			vim.keymap.set("n", "<leader>a", function()
-				harpoon:list():add()
-			end)
-
-			vim.keymap.set("n", "<leader>f", function()
-				harpoon.ui:toggle_quick_menu(harpoon:list())
-			end)
-
-			vim.keymap.set("n", "<leader>1", function()
-				harpoon:list():select(1)
-			end)
-			vim.keymap.set("n", "<leader>2", function()
-				harpoon:list():select(2)
-			end)
-			vim.keymap.set("n", "<leader>3", function()
-				harpoon:list():select(3)
-			end)
-			vim.keymap.set("n", "<leader>4", function()
-				harpoon:list():select(4)
-			end)
-
-			-- Toggle previous & next buffers stored within Harpoon list
-			vim.keymap.set("n", "<leader>[", function()
-				harpoon:list():prev()
-			end)
-			vim.keymap.set("n", "<leader>]", function()
-				harpoon:list():next()
-			end)
-
-			local harpoon_extensions = require("harpoon.extensions")
-
-			harpoon:extend(harpoon_extensions.builtins.highlight_current_file())
-		end,
-	},
-
-	-- LSP Configuration
-	{
-		"neovim/nvim-lspconfig",
-		dependencies = {
-			"williamboman/mason.nvim",
-			"williamboman/mason-lspconfig.nvim",
-			"j-hui/fidget.nvim",
-		},
-		config = function()
-			-- Setup Mason
-			require("mason").setup({
-				ui = {
-					border = "rounded",
-					icons = {
-						package_installed = "✓",
-						package_pending = "➜",
-						package_uninstalled = "✗",
-					},
-				},
-			})
-
-			-- Auto-install LSP servers (mason-lspconfig v2 auto-enables installed servers)
-			require("mason-lspconfig").setup({
-				ensure_installed = {
-					"ts_ls",
-					"tailwindcss",
-					"html",
-					"cssls",
-					"jsonls",
-					"lua_ls",
-					"bashls",
-					"rust_analyzer",
-					"gopls",
-				},
-			})
-
-			-- LSP progress notifications
-			require("fidget").setup({})
-
-			-- Global capabilities for every server (extended by blink.cmp)
-			vim.lsp.config("*", {
-				capabilities = require("blink.cmp").get_lsp_capabilities(),
-			})
-
-			vim.lsp.config("ts_ls", {
-				root_markers = { "package.json", "tsconfig.json" },
-				workspace_required = true,
-				settings = {
-					typescript = {
-						inlayHints = {
-							includeInlayParameterNameHints = "literals",
-							includeInlayFunctionParameterTypeHints = true,
-							includeInlayFunctionLikeReturnTypeHints = true,
-						},
-					},
-					javascript = {
-						inlayHints = {
-							includeInlayParameterNameHints = "literals",
-							includeInlayFunctionParameterTypeHints = true,
-							includeInlayFunctionLikeReturnTypeHints = true,
-						},
-					},
-				},
-			})
-
-			vim.lsp.config("tailwindcss", {
-				settings = {
-					tailwindCSS = {
-						classFunctions = { "cva", "cx" },
-						experimental = {
-							classRegex = {
-								-- Match: const ANYTHING_CLS = "tailwind classes here"
-								-- { "\\w*_CN\\s*=\\s*['\"`]([^'\"`]*)['\"`]" },
-							},
-						},
-					},
-				},
-			})
-
-			vim.lsp.config("lua_ls", {
-				settings = {
-					Lua = {
-						diagnostics = { globals = { "vim" } },
-						workspace = {
-							library = vim.api.nvim_get_runtime_file("", true),
-							checkThirdParty = false,
-						},
-						telemetry = { enable = false },
-					},
-				},
-			})
-
-			vim.lsp.config("rust_analyzer", {
-				settings = {
-					["rust-analyzer"] = {
-						check = { command = "clippy" },
-						cargo = { allFeatures = true },
-					},
-				},
-			})
-
-			vim.lsp.config("gopls", {
-				settings = {
-					gopls = {
-						-- staticcheck adds the `go vet`-style lints gopls doesn't run by default
-						staticcheck = true,
-						gofumpt = true,
-						analyses = {
-							unusedparams = true,
-							unusedwrite = true,
-							nilness = true,
-							shadow = true,
-							useany = true,
-						},
-						hints = {
-							assignVariableTypes = true,
-							compositeLiteralFields = true,
-							constantValues = true,
-							functionTypeParameters = true,
-							parameterNames = true,
-							rangeVariableTypes = true,
-						},
-						codelenses = { gc_details = false, test = true, tidy = true },
-						semanticTokens = true,
-					},
-				},
-			})
-
-			-- LSP keybindings
-			vim.api.nvim_create_autocmd("LspAttach", {
-				group = vim.api.nvim_create_augroup("lsp-attach", { clear = true }),
-				callback = function(event)
-					local map = function(keys, func, desc)
-						vim.keymap.set("n", keys, func, { buffer = event.buf, desc = "LSP: " .. desc })
-					end
-
-					map("gd", vim.lsp.buf.definition, "Goto Definition")
-					vim.keymap.set("n", "grr", function()
-						Snacks.picker.lsp_references()
-					end, { desc = "Goto References" })
-					map("gI", function()
-						Snacks.picker.lsp_implementations()
-					end, "Goto Implementation")
-					map("gt", function()
-						Snacks.picker.lsp_type_definitions()
-					end, "Type Definition")
-					map("<leader>st", function()
-						Snacks.picker.lsp_symbols()
-					end, "Document Symbols")
-					map("<leader>sT", function()
-						Snacks.picker.lsp_workspace_symbols()
-					end, "Workspace Symbols")
-					map("gh", vim.lsp.buf.hover, "Hover Documentation")
-					map("gD", vim.lsp.buf.declaration, "Goto Declaration")
-
-					-- Highlight references under cursor
-					local client = vim.lsp.get_client_by_id(event.data.client_id)
-					if client and client.server_capabilities.documentHighlightProvider then
-						local highlight_group = vim.api.nvim_create_augroup("lsp-highlight", { clear = false })
-						vim.api.nvim_create_autocmd({ "CursorHold", "CursorHoldI" }, {
-							buffer = event.buf,
-							group = highlight_group,
-							callback = vim.lsp.buf.document_highlight,
-						})
-						vim.api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI" }, {
-							buffer = event.buf,
-							group = highlight_group,
-							callback = vim.lsp.buf.clear_references,
-						})
-					end
-				end,
-			})
-
-			-- Clean up highlight autocmds when LSP detaches (e.g. on :LspRestart)
-			vim.api.nvim_create_autocmd("LspDetach", {
-				group = vim.api.nvim_create_augroup("lsp-detach", { clear = true }),
-				callback = function(event)
-					vim.lsp.buf.clear_references()
-					pcall(vim.api.nvim_clear_autocmds, { group = "lsp-highlight", buffer = event.buf })
-				end,
-			})
-		end,
-	},
-
-	{
-		"folke/which-key.nvim",
-		event = "VeryLazy",
-		opts = {
-			delay = 2000,
+	checkbox = {
+		unchecked = { icon = "⬜", highlight = "RenderMarkdownUnchecked" },
+		checked = { icon = "✅", highlight = "RenderMarkdownChecked" },
+		custom = {
+			todo = { raw = "[-]", rendered = "⏳", highlight = "RenderMarkdownTodo" },
 		},
 	},
-
-	-- Autocompletion
-	{
-		"saghen/blink.cmp",
-
-		-- use a release tag to download pre-built binaries
-		version = "1.*",
-
-		---@module 'blink.cmp'
-		---@type blink.cmp.Config
-		opts = {
-			-- 'default' (recommended) for mappings similar to built-in completions (C-y to accept)
-			-- 'super-tab' for mappings similar to vscode (tab to accept)
-			-- 'enter' for enter to accept
-			-- 'none' for no mappings
-			--
-			-- All presets have the following mappings:
-			-- C-space: Open menu or open docs if already open
-			-- C-n/C-p or Up/Down: Select next/previous item
-			-- C-e: Hide menu
-			-- C-k: Toggle signature help (if signature.enabled = true)
-			--
-			-- See :h blink-cmp-config-keymap for defining your own keymap
-			keymap = { preset = "enter" },
-
-			appearance = {
-				-- 'mono' (default) for 'Nerd Font Mono' or 'normal' for 'Nerd Font'
-				-- Adjusts spacing to ensure icons are aligned
-				nerd_font_variant = "mono",
-			},
-
-			-- (Default) Only show the documentation popup when manually triggered
-			completion = {
-				documentation = { auto_show = false },
-				accept = {
-					auto_brackets = {
-						enabled = false,
-					},
-				},
-			},
-
-			signature = { enabled = true },
-
-			-- Completion sources. Keep LSP/path, but disable the buffer source so
-			-- random words from the current file are not suggested.
-			sources = {
-				default = { "lsp", "path" },
-			},
-
-			-- (Default) Rust fuzzy matcher for typo resistance and significantly better performance
-			-- You may use a lua implementation instead by using `implementation = "lua"` or fallback to the lua implementation,
-			-- when the Rust fuzzy matcher is not available, by using `implementation = "prefer_rust"`
-			--
-			-- See the fuzzy documentation for more information
-			fuzzy = { implementation = "prefer_rust_with_warning" },
-		},
-		opts_extend = { "sources.default" },
+	code = {
+		sign = false,
+		width = "block",
+		left_pad = 1,
+		right_pad = 1,
 	},
+})
 
-	-- Formatting
-	{
-		"stevearc/conform.nvim",
-		event = "BufWritePre",
-		cmd = "ConformInfo",
-		opts = {
-			formatters_by_ft = {
-				javascript = { "prettier" },
-				typescript = { "prettier" },
-				javascriptreact = { "prettier" },
-				typescriptreact = { "prettier" },
-				css = { "prettier" },
-				html = { "prettier" },
-				json = { "prettier" },
-				yaml = { "prettier" },
-				markdown = { "prettier" },
-				lua = { "stylua" },
-				rust = { "rustfmt" },
-				go = { "goimports", "gofumpt" },
-			},
-			format_after_save = function(bufnr)
-				if vim.b[bufnr].disable_autoformat or vim.g.disable_autoformat then
-					return
+vim.keymap.set("n", "<leader>m", function()
+	require("render-markdown").toggle()
+end, { desc = "Toggle markdown rendering" })
+
+-- Theme-aware markdown colors (re-applied whenever the colorscheme changes)
+local function markdown_highlights()
+	local function color(name)
+		return vim.api.nvim_get_hl(0, { name = name, link = false }).fg
+	end
+	local muted = color("Comment")
+	-- Read the theme's base heading groups; the .markdown ones are overridden below
+	local function heading(level)
+		return color("@markup.heading." .. level) or color("@markup.heading") or color("Title")
+	end
+	local accent = heading(1)
+	for level = 1, 6 do
+		local fg = heading(level)
+		vim.api.nvim_set_hl(0, "@markup.heading." .. level .. ".markdown", { fg = fg, bold = true })
+		vim.api.nvim_set_hl(0, "RenderMarkdownH" .. level, { fg = fg, bold = true })
+		vim.api.nvim_set_hl(0, "RenderMarkdownH" .. level .. "Bg", { fg = fg, bold = true })
+	end
+	vim.api.nvim_set_hl(0, "RenderMarkdownBullet", { fg = muted })
+	vim.api.nvim_set_hl(0, "RenderMarkdownUnchecked", { fg = muted })
+	vim.api.nvim_set_hl(0, "RenderMarkdownChecked", { fg = accent, bold = true })
+end
+-- VimEnter: render-markdown sets its default colors from its plugin script, after init.lua
+vim.api.nvim_create_autocmd({ "VimEnter", "ColorScheme" }, {
+	group = vim.api.nvim_create_augroup("markdown-highlights", { clear = true }),
+	callback = markdown_highlights,
+})
+
+-- Notes read like a document: wrapped at word boundaries, no line numbers,
+-- signs, cursor line, indent guides or "~" filler lines
+local function notes_view(win)
+	local buf = vim.api.nvim_win_get_buf(win)
+	if vim.bo[buf].buftype ~= "" or vim.api.nvim_win_get_config(win).relative ~= "" then
+		return
+	end
+	local wo = vim.wo[win][0]
+	if vim.bo[buf].filetype == "markdown" then
+		vim.b[buf].snacks_indent = false
+		-- Wrapped list items hang under their text, not the bullet. Task items
+		-- count one extra column because their emoji checkbox is two cells wide.
+		vim.bo[buf].formatlistpat = [[^\s*\(\d\+[.)]\|[-*+]\)\s\+\%(\%(\[.\]\s\)\@=\[\)\?]]
+		wo.breakindentopt = "list:-1"
+		wo.linebreak = true
+		wo.number = false
+		wo.cursorline = false
+		wo.signcolumn = "no"
+		wo.statuscolumn = ""
+		wo.fillchars = "eob: ,vert: "
+		wo.winbar = "%#Normal# " -- an empty top row, so a heading on line 1 isn't flush against the edge
+	elseif wo.fillchars == "eob: ,vert: " then
+		-- A code file in a window that showed (or was split from) a note: restore editor defaults
+		for _, opt in ipairs({
+			"linebreak",
+			"breakindentopt",
+			"number",
+			"cursorline",
+			"signcolumn",
+			"fillchars",
+			"winbar",
+		}) do
+			wo[opt] = vim.go[opt]
+		end
+	end
+end
+
+vim.api.nvim_create_autocmd({ "BufWinEnter", "FileType", "SessionLoadPost" }, {
+	group = vim.api.nvim_create_augroup("notes-view", { clear = true }),
+	callback = function()
+		for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+			notes_view(win)
+		end
+	end,
+})
+
+-- Centered reading column: while a note is the only window on screen, empty
+-- side windows keep it NOTES_WIDTH columns wide in the middle. Any split or
+-- the explorer sidebar removes them until the note is alone again.
+local NOTES_WIDTH = 88
+
+local function notes_pads()
+	return vim.tbl_filter(function(w)
+		return vim.w[w].notes_pad == true
+	end, vim.api.nvim_tabpage_list_wins(0))
+end
+
+local function notes_close_pads()
+	for _, w in ipairs(notes_pads()) do
+		pcall(vim.api.nvim_win_close, w, true)
+	end
+end
+
+local function notes_layout()
+	local editors = vim.tbl_filter(function(w)
+		return vim.api.nvim_win_get_config(w).relative == "" and not vim.w[w].notes_pad
+	end, vim.api.nvim_tabpage_list_wins(0))
+	local note = editors[1]
+	local width = math.floor((vim.o.columns - NOTES_WIDTH - 2) / 2)
+	local buf = note and vim.api.nvim_win_get_buf(note)
+	if #editors ~= 1 or vim.bo[buf].filetype ~= "markdown" or vim.bo[buf].buftype ~= "" or width < 2 then
+		notes_close_pads()
+		return
+	end
+	local pads = notes_pads()
+	if #pads == 0 then
+		for _, side in ipairs({ "left", "right" }) do
+			local pad_buf = vim.api.nvim_create_buf(false, true)
+			vim.bo[pad_buf].bufhidden = "wipe"
+			local w = vim.api.nvim_open_win(pad_buf, false, { split = side, win = -1, style = "minimal" })
+			vim.w[w].notes_pad = true
+			vim.wo[w].fillchars = "eob: ,vert: "
+			vim.wo[w].winfixwidth = true
+			table.insert(pads, w)
+		end
+	end
+	for _, w in ipairs(pads) do
+		vim.api.nvim_win_set_width(w, width)
+	end
+end
+
+vim.api.nvim_create_autocmd({ "BufWinEnter", "WinNew", "WinClosed", "VimResized", "TabEnter", "SessionLoadPost" }, {
+	group = vim.api.nvim_create_augroup("notes-layout", { clear = true }),
+	callback = function()
+		vim.schedule(notes_layout)
+	end,
+})
+
+-- The side windows are never a destination: clicking or moving into one returns to the note
+vim.api.nvim_create_autocmd("WinEnter", {
+	group = vim.api.nvim_create_augroup("notes-pad-skip", { clear = true }),
+	callback = function()
+		if vim.w.notes_pad then
+			vim.cmd.wincmd("p")
+		end
+	end,
+})
+
+-- :q on the note quits Neovim instead of leaving the empty side windows behind
+vim.api.nvim_create_autocmd("QuitPre", {
+	group = vim.api.nvim_create_augroup("notes-pad-quit", { clear = true }),
+	callback = notes_close_pads,
+})
+
+-- Vault sync, replacing Obsidian Git. Notes in the vault save themselves as you
+-- edit. A minute after the last change they are committed as "vault backup:
+-- <date>", rebased onto anything new from the phone, and pushed. New changes are
+-- pulled when a vault note opens, when Neovim regains focus, and on the first key
+-- after a few idle minutes, at most once a minute. A conflict is never resolved
+-- automatically: the rebase is undone and a macOS notification says so.
+do
+	local VAULT = vim.fs.normalize("~/vaults/irsh-world")
+	local PUSH_DELAY = 60 * 1000 -- ms after the last save
+	local PULL_GAP = 60 -- seconds between pulls at most
+	local IDLE = 3 * 60 -- seconds without a key before the next key pulls
+	local timer = assert(vim.uv.new_timer())
+	local running, pending, exiting, conflicted = false, false, false, false
+	local last_pull, last_key = 0, os.time()
+
+	local function in_vault(buf)
+		return vim.bo[buf].buftype == "" and vim.startswith(vim.api.nvim_buf_get_name(buf), VAULT .. "/")
+	end
+
+	local function vault_in_use()
+		if vim.startswith(vim.fn.getcwd() .. "/", VAULT .. "/") then
+			return true
+		end
+		for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+			if vim.api.nvim_buf_is_loaded(buf) and in_vault(buf) then
+				return true
+			end
+		end
+		return false
+	end
+
+	-- OSC 777 makes Rex show a macOS notification
+	local function notify(msg)
+		vim.notify("Vault sync: " .. msg, vim.log.levels.WARN)
+		pcall(vim.api.nvim_ui_send, "\27]777;notify;Vault sync;" .. msg:gsub("[;\27\7]", ",") .. "\7")
+	end
+
+	-- Runs git in the vault. While Neovim is quitting the whole chain runs
+	-- synchronously, so a pending backup is pushed before it exits.
+	local function git(args, done)
+		local cmd = vim.list_extend({ "git", "-C", VAULT }, args)
+		local opts = { text = true, env = { GIT_TERMINAL_PROMPT = "0" } }
+		if exiting then
+			return done(vim.system(cmd, opts):wait(20000))
+		end
+		vim.system(cmd, opts, vim.schedule_wrap(done))
+	end
+
+	local sync
+
+	-- Only one Neovim syncs the vault at a time (say the floating panel and a
+	-- tab both have it open). The lock is a directory: creating one is atomic.
+	local LOCK = VAULT .. "/.git/nvim-vault-sync.lock"
+	local function lock()
+		if vim.uv.fs_mkdir(LOCK, 448) then
+			return true
+		end
+		local stat = vim.uv.fs_stat(LOCK)
+		if stat and os.time() - stat.mtime.sec > 120 then -- left behind by a crash
+			vim.uv.fs_rmdir(LOCK)
+			return vim.uv.fs_mkdir(LOCK, 448) == true
+		end
+		return false
+	end
+
+	local function finish()
+		running = false
+		vim.uv.fs_rmdir(LOCK)
+		if not exiting then
+			vim.cmd("silent! checktime") -- reload notes the pull changed
+		end
+		if pending then
+			pending = false
+			sync()
+		end
+	end
+
+	-- Fetch, then rebase onto origin/main by name. (`git pull --rebase` reads
+	-- FETCH_HEAD, which overlapping fetches can leave listing the branch twice:
+	-- "cannot rebase onto multiple branches".)
+	local function pull_rebase(next_step)
+		git({ "fetch", "--quiet", "origin" }, function(f)
+			last_pull = os.time()
+			if f.code ~= 0 then
+				-- Usually just offline; the next save or pull tries again
+				vim.notify("Vault sync: fetch failed: " .. vim.trim(f.stderr or ""), vim.log.levels.WARN)
+				return finish()
+			end
+			git({ "rebase", "--quiet", "@{upstream}" }, function(r)
+				if r.code == 0 then
+					conflicted = false
+					return next_step()
 				end
-				local formatters = require("conform").list_formatters(bufnr)
-				if #formatters == 0 then
-					return
-				end
-				return { lsp_format = "fallback" }
-			end,
-		},
-	},
-
-	-- Indentation guides
-	{
-		"lukas-reineke/indent-blankline.nvim",
-		main = "ibl",
-		opts = {
-			indent = { char = "│" },
-			scope = {
-				enabled = true,
-				show_start = false,
-				show_end = false,
-			},
-		},
-	},
-
-	-- Git signs
-	{
-		"lewis6991/gitsigns.nvim",
-		opts = {
-			signs = {
-				add = { text = "+" },
-				change = { text = "~" },
-				delete = { text = "_" },
-				topdelete = { text = "‾" },
-				changedelete = { text = "~" },
-			},
-			on_attach = function(bufnr)
-				local gitsigns = require("gitsigns")
-
-				local function map(mode, l, r, opts)
-					opts = opts or {}
-					opts.buffer = bufnr
-					vim.keymap.set(mode, l, r, opts)
-				end
-
-				-- Navigation
-				map("n", "]c", function()
-					if vim.wo.diff then
-						vim.cmd.normal({ "]c", bang = true })
+				if vim.uv.fs_stat(VAULT .. "/.git/rebase-merge") or vim.uv.fs_stat(VAULT .. "/.git/rebase-apply") then
+					git({ "rebase", "--abort" }, function()
+						if not conflicted then
+							conflicted = true
+							notify(
+								"A note changed on both the phone and the Mac. Your edits are committed locally; run `git pull --rebase` in the vault to merge."
+							)
+						end
+						finish()
+					end)
+				else
+					if (r.stderr or ""):find("unstaged changes") then
+						pending = true -- a note was saved mid-pull: back it up and try again
 					else
-						gitsigns.nav_hunk("next")
+						vim.notify("Vault sync: rebase failed: " .. vim.trim(r.stderr or ""), vim.log.levels.WARN)
 					end
-				end, { desc = "go to next hunk" })
+					finish()
+				end
+			end)
+		end)
+	end
 
-				map("n", "[c", function()
-					if vim.wo.diff then
-						vim.cmd.normal({ "[c", bang = true })
-					else
-						gitsigns.nav_hunk("prev")
-					end
-				end, { desc = "go to prev hunk" })
+	-- Commit everything, rebase onto the remote, push
+	sync = function()
+		if running then
+			pending = true
+			return
+		end
+		-- Another Neovim is syncing: try again shortly (when quitting, wait for it)
+		if not (exiting and vim.wait(10000, lock, 200) or not exiting and lock()) then
+			if not exiting then
+				timer:start(10000, 0, vim.schedule_wrap(sync))
+			end
+			return
+		end
+		running = true
+		timer:stop()
+		git({ "add", "-A" }, function()
+			git({ "diff", "--cached", "--quiet" }, function(staged)
+				local function rebase_and_push()
+					pull_rebase(function()
+						git({ "push", "--quiet" }, function(r)
+							if r.code ~= 0 then
+								vim.notify("Vault sync: push failed: " .. vim.trim(r.stderr or ""), vim.log.levels.WARN)
+							end
+							finish()
+						end)
+					end)
+				end
+				if staged.code == 0 then
+					return rebase_and_push()
+				end
+				git({ "commit", "--quiet", "-m", "vault backup: " .. os.date("%Y-%m-%d %H:%M:%S") }, rebase_and_push)
+			end)
+		end)
+	end
 
-				-- Actions
-				map("n", "<leader>hs", gitsigns.stage_hunk, { desc = "stage hunk" })
-				map("n", "<leader>hr", gitsigns.reset_hunk, { desc = "reset hunk" })
+	local function pull()
+		if running or timer:is_active() or os.time() - last_pull < PULL_GAP or not vault_in_use() then
+			return -- a sync already in flight or coming up pulls first anyway
+		end
+		if not lock() then
+			return -- another Neovim is syncing right now
+		end
+		running = true
+		git({ "status", "--porcelain" }, function(r)
+			if vim.trim(r.stdout or "") ~= "" then
+				running = false
+				vim.uv.fs_rmdir(LOCK)
+				return sync() -- local changes from an earlier session: back them up first
+			end
+			pull_rebase(finish)
+		end)
+	end
 
-				map("v", "<leader>hs", function()
-					gitsigns.stage_hunk({ vim.fn.line("."), vim.fn.line("v") })
+	local group = vim.api.nvim_create_augroup("vault-sync", { clear = true })
+	vim.api.nvim_create_autocmd({ "InsertLeave", "TextChanged", "FocusLost", "BufLeave" }, {
+		group = group,
+		nested = true, -- so the write fires BufWritePost and starts the backup countdown
+		callback = function(ev)
+			if in_vault(ev.buf) and vim.bo[ev.buf].modified then
+				vim.api.nvim_buf_call(ev.buf, function()
+					vim.cmd("silent! lockmarks update")
 				end)
-
-				map("v", "<leader>hr", function()
-					gitsigns.reset_hunk({ vim.fn.line("."), vim.fn.line("v") })
-				end)
-
-				map("n", "<leader>hS", gitsigns.stage_buffer, { desc = "stage buffer" })
-				map("n", "<leader>hR", gitsigns.reset_buffer, { desc = "reset buffer" })
-				map("n", "<leader>hp", gitsigns.preview_hunk, { desc = "preview hunk" })
-				map("n", "<leader>hi", gitsigns.preview_hunk_inline, { desc = "preview hunk inline" })
-
-				map("n", "<leader>hb", function()
-					gitsigns.blame_line({ full = true })
-				end, { desc = "open blame line full" })
-
-				map("n", "<leader>hQ", function()
-					gitsigns.setqflist("all")
-				end)
-				map("n", "<leader>hq", gitsigns.setqflist)
-
-				-- Toggles
-				map("n", "<leader>tb", gitsigns.toggle_current_line_blame, { desc = "toggle current line blame" })
-			end,
-		},
-	},
-	{
-		"nvim-lualine/lualine.nvim",
-		dependencies = { "nvim-tree/nvim-web-devicons" },
-		config = function(_, _)
-			require("lualine").setup({
-				sections = {
-					lualine_a = {},
-					lualine_b = { "branch", "diff" },
-					lualine_c = { { "filename", path = 1, symbols = { modified = " ●" } } },
-					lualine_x = { "diagnostics" },
-				},
-			})
+			end
 		end,
-	},
-	{
-		"stevearc/oil.nvim",
-		---@module 'oil'
-		---@type oil.SetupOpts
-		opts = {
-			default_file_explorer = false,
-			view_options = {
-				show_hidden = true,
-			},
-			watch_for_changes = true,
-			keymaps = {
-				["<C-r>"] = "actions.refresh",
+	})
+	vim.api.nvim_create_autocmd("BufWritePost", {
+		group = group,
+		callback = function(ev)
+			if in_vault(ev.buf) then
+				timer:stop()
+				timer:start(PUSH_DELAY, 0, vim.schedule_wrap(sync))
+			end
+		end,
+	})
+	vim.api.nvim_create_autocmd("BufEnter", {
+		group = group,
+		callback = function(ev)
+			if in_vault(ev.buf) then
+				vim.b[ev.buf].disable_autoformat = true -- notes are saved as they're typed; don't let prettier rewrite them
+			end
+		end,
+	})
+	vim.api.nvim_create_autocmd({ "VimEnter", "BufEnter", "FocusGained" }, {
+		group = group,
+		callback = function()
+			pull()
+		end,
+	})
+	vim.on_key(function()
+		local now = os.time()
+		if now - last_key > IDLE then
+			vim.schedule(pull)
+		end
+		last_key = now
+	end, vim.api.nvim_create_namespace("vault-sync"))
+	vim.api.nvim_create_autocmd("VimLeavePre", {
+		group = group,
+		callback = function()
+			if timer:is_active() and not running then
+				exiting = true
+				sync()
+			end
+		end,
+	})
+	vim.api.nvim_create_user_command("VaultSync", function()
+		sync()
+	end, { desc = "Back up and sync the notes vault now" })
+end
+
+-- Auto pairs for brackets, quotes, etc.
+after_startup(function()
+	require("nvim-autopairs").setup({})
+end)
+
+-- Harpoon
+after_startup(function()
+	local harpoon = require("harpoon")
+	harpoon.setup()
+
+	vim.keymap.set("n", "<leader>a", function()
+		harpoon:list():add()
+	end)
+
+	vim.keymap.set("n", "<leader>f", function()
+		harpoon.ui:toggle_quick_menu(harpoon:list())
+	end)
+
+	vim.keymap.set("n", "<leader>1", function()
+		harpoon:list():select(1)
+	end)
+	vim.keymap.set("n", "<leader>2", function()
+		harpoon:list():select(2)
+	end)
+	vim.keymap.set("n", "<leader>3", function()
+		harpoon:list():select(3)
+	end)
+	vim.keymap.set("n", "<leader>4", function()
+		harpoon:list():select(4)
+	end)
+
+	-- Toggle previous & next buffers stored within Harpoon list
+	vim.keymap.set("n", "<leader>[", function()
+		harpoon:list():prev()
+	end)
+	vim.keymap.set("n", "<leader>]", function()
+		harpoon:list():next()
+	end)
+
+	harpoon:extend(require("harpoon.extensions").builtins.highlight_current_file())
+end)
+
+-- Autocompletion
+after_startup(function()
+	require("blink.cmp").setup({
+		-- 'enter' preset: Enter accepts. All presets also have:
+		-- C-space: open menu/docs, C-n/C-p or Up/Down: select, C-e: hide, C-k: toggle signature help
+		keymap = { preset = "enter" },
+
+		appearance = {
+			-- 'mono' (default) for 'Nerd Font Mono' or 'normal' for 'Nerd Font'
+			nerd_font_variant = "mono",
+		},
+
+		completion = {
+			-- Only show the documentation popup when manually triggered
+			documentation = { auto_show = false },
+			accept = {
+				auto_brackets = {
+					enabled = false,
+				},
 			},
 		},
-		dependencies = { "nvim-tree/nvim-web-devicons" }, -- use if you prefer nvim-web-devicons
-		lazy = false,
+
+		signature = { enabled = true },
+
+		-- Keep LSP/path, but disable the buffer source so random words from the
+		-- current file are not suggested.
+		sources = {
+			default = { "lsp", "path" },
+		},
+
+		-- Rust fuzzy matcher (prebuilt binary downloaded for the release tag)
+		fuzzy = { implementation = "prefer_rust_with_warning" },
+	})
+end)
+
+-- LSP (after blink.cmp, whose capabilities every server gets). mason puts its
+-- servers on PATH before mason-lspconfig enables them for the open buffers.
+after_startup(function()
+	require("mason").setup({
+		ui = {
+			icons = {
+				package_installed = "✓",
+				package_pending = "➜",
+				package_uninstalled = "✗",
+			},
+		},
+	})
+
+	-- Global capabilities for every server (extended by blink.cmp)
+	vim.lsp.config("*", {
+		capabilities = require("blink.cmp").get_lsp_capabilities(),
+	})
+
+	vim.lsp.config("ts_ls", {
+		root_markers = { "package.json", "tsconfig.json" },
+		workspace_required = true,
+		settings = {
+			typescript = {
+				inlayHints = {
+					includeInlayParameterNameHints = "literals",
+					includeInlayFunctionParameterTypeHints = true,
+					includeInlayFunctionLikeReturnTypeHints = true,
+				},
+			},
+			javascript = {
+				inlayHints = {
+					includeInlayParameterNameHints = "literals",
+					includeInlayFunctionParameterTypeHints = true,
+					includeInlayFunctionLikeReturnTypeHints = true,
+				},
+			},
+		},
+	})
+
+	vim.lsp.config("lua_ls", {
+		settings = {
+			Lua = {
+				diagnostics = { globals = { "vim" } },
+				workspace = {
+					library = vim.api.nvim_get_runtime_file("", true),
+					checkThirdParty = false,
+				},
+				telemetry = { enable = false },
+			},
+		},
+	})
+
+	vim.lsp.config("rust_analyzer", {
+		settings = {
+			["rust-analyzer"] = {
+				check = { command = "clippy" },
+				cargo = { allFeatures = true },
+			},
+		},
+	})
+
+	vim.lsp.config("gopls", {
+		settings = {
+			gopls = {
+				-- staticcheck adds the `go vet`-style lints gopls doesn't run by default
+				staticcheck = true,
+				gofumpt = true,
+				analyses = {
+					unusedparams = true,
+					unusedwrite = true,
+					nilness = true,
+					shadow = true,
+					useany = true,
+				},
+				hints = {
+					assignVariableTypes = true,
+					compositeLiteralFields = true,
+					constantValues = true,
+					functionTypeParameters = true,
+					parameterNames = true,
+					rangeVariableTypes = true,
+				},
+				codelenses = { gc_details = false, test = true, tidy = true },
+				semanticTokens = true,
+			},
+		},
+	})
+
+	-- Auto-install LSP servers (mason-lspconfig v2 auto-enables installed servers)
+	require("mason-lspconfig").setup({
+		ensure_installed = {
+			"ts_ls",
+			"html",
+			"cssls",
+			"jsonls",
+			"lua_ls",
+			"bashls",
+			"rust_analyzer",
+			"gopls",
+		},
+	})
+
+	-- LSP keybindings
+	vim.api.nvim_create_autocmd("LspAttach", {
+		group = vim.api.nvim_create_augroup("lsp-attach", { clear = true }),
+		callback = function(event)
+			local map = function(keys, func, desc)
+				vim.keymap.set("n", keys, func, { buffer = event.buf, desc = "LSP: " .. desc })
+			end
+
+			map("gd", vim.lsp.buf.definition, "Goto Definition")
+			vim.keymap.set("n", "grr", function()
+				Snacks.picker.lsp_references()
+			end, { desc = "Goto References" })
+			map("gI", function()
+				Snacks.picker.lsp_implementations()
+			end, "Goto Implementation")
+			map("gt", function()
+				Snacks.picker.lsp_type_definitions()
+			end, "Type Definition")
+			map("<leader>st", function()
+				Snacks.picker.lsp_symbols()
+			end, "Document Symbols")
+			map("<leader>sT", function()
+				Snacks.picker.lsp_workspace_symbols()
+			end, "Workspace Symbols")
+			map("gh", vim.lsp.buf.hover, "Hover Documentation")
+			map("gD", vim.lsp.buf.declaration, "Goto Declaration")
+
+			local client = vim.lsp.get_client_by_id(event.data.client_id)
+			if not client then
+				return
+			end
+
+			-- Prefer LSP folding ranges over treesitter when the server provides them
+			if client:supports_method("textDocument/foldingRange") then
+				local win = vim.api.nvim_get_current_win()
+				vim.wo[win][0].foldexpr = "v:lua.vim.lsp.foldexpr()"
+			end
+
+			-- Highlight references under cursor
+			if client:supports_method("textDocument/documentHighlight") then
+				local highlight_group = vim.api.nvim_create_augroup("lsp-highlight", { clear = false })
+				vim.api.nvim_create_autocmd({ "CursorHold", "CursorHoldI" }, {
+					buffer = event.buf,
+					group = highlight_group,
+					callback = vim.lsp.buf.document_highlight,
+				})
+				vim.api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI" }, {
+					buffer = event.buf,
+					group = highlight_group,
+					callback = vim.lsp.buf.clear_references,
+				})
+			end
+		end,
+	})
+
+	-- Clean up highlight autocmds when LSP detaches (e.g. on :lsp restart)
+	vim.api.nvim_create_autocmd("LspDetach", {
+		group = vim.api.nvim_create_augroup("lsp-detach", { clear = true }),
+		callback = function(event)
+			vim.lsp.buf.clear_references()
+			pcall(vim.api.nvim_clear_autocmds, { group = "lsp-highlight", buffer = event.buf })
+		end,
+	})
+end)
+
+after_startup(function()
+	require("which-key").setup({
+		delay = 2000,
+	})
+end)
+
+-- Formatting
+after_startup(function()
+	require("conform").setup({
+		formatters_by_ft = {
+			javascript = { "prettier" },
+			typescript = { "prettier" },
+			javascriptreact = { "prettier" },
+			typescriptreact = { "prettier" },
+			css = { "prettier" },
+			html = { "prettier" },
+			json = { "prettier" },
+			yaml = { "prettier" },
+			markdown = { "prettier" },
+			lua = { "stylua" },
+			rust = { "rustfmt" },
+			go = { "goimports", "gofumpt" },
+		},
+		format_after_save = function(bufnr)
+			if vim.b[bufnr].disable_autoformat or vim.g.disable_autoformat then
+				return
+			end
+			local formatters = require("conform").list_formatters(bufnr)
+			if #formatters == 0 then
+				return
+			end
+			return { lsp_format = "fallback" }
+		end,
+	})
+end)
+
+-- Git signs
+after_startup(function()
+	require("gitsigns").setup({
+		signs = {
+			add = { text = "+" },
+			change = { text = "~" },
+			delete = { text = "_" },
+			topdelete = { text = "‾" },
+			changedelete = { text = "~" },
+		},
+		on_attach = function(bufnr)
+			local gitsigns = require("gitsigns")
+
+			local function map(mode, l, r, opts)
+				opts = opts or {}
+				opts.buffer = bufnr
+				vim.keymap.set(mode, l, r, opts)
+			end
+
+			-- Navigation
+			map("n", "]c", function()
+				if vim.wo.diff then
+					vim.cmd.normal({ "]c", bang = true })
+				else
+					gitsigns.nav_hunk("next")
+				end
+			end, { desc = "go to next hunk" })
+
+			map("n", "[c", function()
+				if vim.wo.diff then
+					vim.cmd.normal({ "[c", bang = true })
+				else
+					gitsigns.nav_hunk("prev")
+				end
+			end, { desc = "go to prev hunk" })
+
+			-- Actions
+			map("n", "<leader>hs", gitsigns.stage_hunk, { desc = "stage hunk" })
+			map("n", "<leader>hr", gitsigns.reset_hunk, { desc = "reset hunk" })
+
+			map("v", "<leader>hs", function()
+				gitsigns.stage_hunk({ vim.fn.line("."), vim.fn.line("v") })
+			end)
+
+			map("v", "<leader>hr", function()
+				gitsigns.reset_hunk({ vim.fn.line("."), vim.fn.line("v") })
+			end)
+
+			map("n", "<leader>hS", gitsigns.stage_buffer, { desc = "stage buffer" })
+			map("n", "<leader>hR", gitsigns.reset_buffer, { desc = "reset buffer" })
+			map("n", "<leader>hp", gitsigns.preview_hunk, { desc = "preview hunk" })
+			map("n", "<leader>hi", gitsigns.preview_hunk_inline, { desc = "preview hunk inline" })
+
+			map("n", "<leader>hb", function()
+				gitsigns.blame_line({ full = true })
+			end, { desc = "open blame line full" })
+
+			map("n", "<leader>hQ", function()
+				gitsigns.setqflist("all")
+			end)
+			map("n", "<leader>hq", gitsigns.setqflist)
+
+			-- Toggles
+			map("n", "<leader>tb", gitsigns.toggle_current_line_blame, { desc = "toggle current line blame" })
+		end,
+	})
+end)
+
+require("lualine").setup({
+	options = { globalstatus = true },
+	sections = {
+		lualine_a = {},
+		lualine_b = { "branch", "diff" },
+		lualine_c = { { "filename", path = 1, symbols = { modified = " ●" } } },
+		lualine_x = { "diagnostics" },
 	},
-	{
-		"folke/snacks.nvim",
-		---@type snacks.Config
-		opts = {
-			-- Disable treesitter/LSP/syntax on files >1.5MB so big generated files
-			-- (minified bundles, GraphQL schemas, logs) open instantly instead of freezing.
-			bigfile = { enabled = true },
-			picker = {
-				sources = {
-					explorer = {
-						layout = {
-							auto_hide = { "input" },
-							layout = {
-								position = "right",
-								width = 0.30,
-							},
-						},
-						hidden = true,
-						ignored = true,
-						auto_close = false,
-						win = {
-							list = {
-								keys = {
-									["e"] = "toggle_maximize",
-								},
-							},
+})
+
+require("oil").setup({
+	default_file_explorer = false,
+	view_options = {
+		show_hidden = true,
+	},
+	watch_for_changes = true,
+	keymaps = {
+		["<C-r>"] = "actions.refresh",
+	},
+})
+
+require("snacks").setup({
+	-- Disable treesitter/LSP/syntax on files >1.5MB so big generated files
+	-- (minified bundles, GraphQL schemas, logs) open instantly instead of freezing.
+	bigfile = { enabled = true },
+	-- Indentation guides with the current scope highlighted
+	indent = {
+		enabled = true,
+		animate = { enabled = false },
+	},
+	picker = {
+		sources = {
+			explorer = {
+				layout = {
+					auto_hide = { "input" },
+					layout = {
+						position = "right",
+						width = 0.30,
+					},
+				},
+				hidden = true,
+				ignored = true,
+				auto_close = false,
+				win = {
+					list = {
+						keys = {
+							["e"] = "toggle_maximize",
 						},
 					},
-					smart = {
-						layout = { preset = "dropdown", preview = false },
-					},
 				},
 			},
+			smart = {
+				layout = { preset = "dropdown", preview = false },
+			},
 		},
-		config = function(_, opts)
-			require("snacks").setup(opts)
-			vim.api.nvim_set_hl(0, "SnacksPickerTree", { fg = "#54546d", bg = "NONE" })
-		end,
 	},
-	{
-		"rmagatti/auto-session",
-		lazy = false,
+})
+vim.api.nvim_set_hl(0, "SnacksPickerTree", { fg = "#54546d", bg = "NONE" })
 
-		---enables autocomplete for opts
-		---@module "auto-session"
-		---@type AutoSession.Config
-		opts = {
-			suppressed_dirs = { "~/", "~/Projects", "~/Downloads", "/" },
-		},
-	},
-	{
-		"kevinhwang91/nvim-ufo",
-		event = "BufEnter",
-		dependencies = {
-			"kevinhwang91/promise-async",
-		},
-		config = function()
-			--- @diagnostic disable: unused-local
-			local ufo = require("ufo")
-
-			ufo.setup({
-				provider_selector = function(_bufnr, _filetype, _buftype)
-					return { "treesitter", "indent" }
-				end,
-			})
-		end,
-	},
+require("auto-session").setup({
+	suppressed_dirs = { "~/", "~/Projects", "~/Downloads", "/" },
 })
 -- plugins end
 
@@ -629,14 +1003,17 @@ vim.opt.mouse = "a"
 vim.opt.termguicolors = true
 vim.opt.signcolumn = "yes"
 vim.opt.cursorline = true
+vim.opt.laststatus = 3 -- one statusline at the bottom instead of one per window
 vim.opt.updatetime = 250
 
 vim.opt.undofile = true
 vim.opt.breakindent = true
 
--- Fold settings
+-- Fold settings: treesitter folds by default, LSP folding ranges when available (see LspAttach)
 vim.o.foldcolumn = "0"
-vim.opt.foldmethod = "manual"
+vim.opt.foldmethod = "expr"
+vim.opt.foldexpr = "v:lua.vim.treesitter.foldexpr()"
+vim.opt.foldtext = "" -- show the folded line with its syntax highlighting
 vim.opt.foldlevel = 99 -- Allow folds to be created
 vim.opt.foldlevelstart = 99 -- Open all folds when opening a file
 vim.opt.foldenable = true
@@ -667,10 +1044,6 @@ vim.keymap.set("n", "<C-j>", "<C-w>j")
 vim.keymap.set("n", "<C-k>", "<C-w>k")
 vim.keymap.set("n", "<C-l>", "<C-w>l")
 
--- Move lines in visual mode
-vim.keymap.set("v", "J", ":m '>+1<CR>gv=gv")
-vim.keymap.set("v", "K", ":m '<-2<CR>gv=gv")
-
 -- Keep cursor centered
 vim.keymap.set("n", "<C-d>", "<C-d>zz")
 vim.keymap.set("n", "<C-u>", "<C-u>zz")
@@ -691,6 +1064,8 @@ vim.keymap.set("n", "<leader>e", function()
 end, { desc = "Toggle file explorer" })
 
 vim.keymap.set("n", "-", "<cmd>Oil .<CR>", { desc = "Open Oil.nvim" })
+
+vim.keymap.set("n", "<leader>u", "<cmd>Undotree<CR>", { desc = "Toggle undo tree" })
 
 -- Picker keymaps (snacks.nvim)
 vim.keymap.set("n", "<leader>sf", function()
@@ -740,17 +1115,6 @@ vim.api.nvim_create_autocmd("FileType", {
 		vim.bo.tabstop = 4
 		vim.bo.shiftwidth = 4
 		vim.bo.softtabstop = 4
-	end,
-})
-
--- console.log snippet in JS/TS via <C-l>
-vim.api.nvim_create_autocmd("FileType", {
-	pattern = { "javascript", "typescript", "javascriptreact", "typescriptreact" },
-	group = vim.api.nvim_create_augroup("js-snippets", { clear = true }),
-	callback = function(args)
-		vim.keymap.set("i", "<C-l>", function()
-			vim.snippet.expand('console.log("$1");$0')
-		end, { buffer = args.buf, desc = "console.log" })
 	end,
 })
 
@@ -822,13 +1186,13 @@ do
 		{
 			name = "Restart TS server",
 			action = function()
-				vim.cmd("LspRestart ts_ls")
+				vim.cmd("lsp restart ts_ls")
 			end,
 		},
 		{
 			name = "Restart all LSP servers",
 			action = function()
-				vim.cmd("LspRestart")
+				vim.cmd("lsp restart")
 			end,
 		},
 		{
@@ -886,6 +1250,12 @@ do
 			end,
 		},
 		{
+			name = "Update plugins",
+			action = function()
+				vim.pack.update()
+			end,
+		},
+		{
 			name = "Toggle diagnostics",
 			action = function()
 				vim.diagnostic.enable(not vim.diagnostic.is_enabled())
@@ -895,6 +1265,12 @@ do
 			name = "Toggle word wrap",
 			action = function()
 				vim.wo.wrap = not vim.wo.wrap
+			end,
+		},
+		{
+			name = "Toggle markdown rendering",
+			action = function()
+				require("render-markdown").toggle()
 			end,
 		},
 		{
@@ -916,10 +1292,9 @@ do
 			end,
 		},
 		{
-			name = "Reload config",
+			name = "Restart Neovim (reload config)",
 			action = function()
-				vim.cmd("source $MYVIMRC")
-				vim.notify("Reloaded init.lua")
+				vim.cmd("restart")
 			end,
 		},
 		{

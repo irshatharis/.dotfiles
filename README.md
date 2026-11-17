@@ -24,9 +24,12 @@ in the way before creating a symlink.
 | `.gitconfig`              | `~/.gitconfig`                       |
 | `rex/`                    | `~/.config/rex`                      |
 | `karabiner-elements.json` | `~/.config/karabiner/karabiner.json` |
-| `init.lua`, `lazy-lock.json` | `~/.config/nvim/`                  |
+| `init.lua`, `nvim-pack-lock.json` | `~/.config/nvim/`             |
 | `git/ignore`              | `~/.config/git/ignore` (global gitignore) |
 | `hunk/config.toml`        | `~/.config/hunk/config.toml`         |
+
+Neovim needs 0.12+ and `brew install neovim tree-sitter-cli`. Plugins are managed
+by the built-in `vim.pack` and install on first launch.
 
 ## Secrets
 

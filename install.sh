@@ -45,7 +45,7 @@ symlink "claude/settings.json" "$HOME/.claude/settings.json"
 
 echo "==> neovim"
 symlink "init.lua"       "$HOME/.config/nvim/init.lua"
-symlink "lazy-lock.json" "$HOME/.config/nvim/lazy-lock.json"
+symlink "nvim-pack-lock.json" "$HOME/.config/nvim/nvim-pack-lock.json"
 
 echo "==> git global ignore"
 symlink "git/ignore"    "$HOME/.config/git/ignore"
