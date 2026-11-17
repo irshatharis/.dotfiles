@@ -178,8 +178,11 @@ require("render-markdown").setup({
 		position = "inline",
 		width = "block",
 		backgrounds = {},
-		-- Blank space above and below headings (reuses existing empty lines)
+		-- Blank space above and below headings. Always drawn as extra virtual rows:
+		-- reusing an empty line instead made a row appear the moment you typed on
+		-- the line next to a heading, pushing everything below it down.
 		border = true,
+		border_virtual = true,
 		above = " ",
 		below = " ",
 	},
@@ -205,6 +208,53 @@ require("render-markdown").setup({
 vim.keymap.set("n", "<leader>m", function()
 	require("render-markdown").toggle()
 end, { desc = "Toggle markdown rendering" })
+
+-- <leader>l in a note: tick or untick a task. On a list item or plain text it
+-- becomes a task; on an empty line it starts a new task in insert mode.
+-- Edits touch only the characters that change: replacing the whole line would
+-- wipe the line's rendering and flash raw markdown until it is redrawn.
+local function toggle_task()
+	local row, col = unpack(vim.api.nvim_win_get_cursor(0))
+	local line = vim.api.nvim_get_current_line()
+	local indent, rest = line:match("^(%s*)(.*)$")
+
+	local function insert(at, text)
+		vim.api.nvim_buf_set_text(0, row - 1, at, row - 1, at, { text })
+		vim.api.nvim_win_set_cursor(0, { row, col >= at and col + #text or col })
+	end
+
+	if rest == "" then
+		insert(#line, "- [ ] ")
+		vim.cmd("startinsert!")
+		return
+	end
+
+	local marker, state = rest:match("^([-*+]%s+)%[(.)%]")
+	if not marker then
+		marker, state = rest:match("^(%d+[.)]%s+)%[(.)%]")
+	end
+	if marker then
+		local at = #indent + #marker + 1
+		vim.api.nvim_buf_set_text(0, row - 1, at, row - 1, at + 1, { state:lower() == "x" and " " or "x" })
+		vim.api.nvim_win_set_cursor(0, { row, col })
+		return
+	end
+
+	marker = rest:match("^[-*+]%s+") or rest:match("^%d+[.)]%s+")
+	if marker then
+		insert(#indent + #marker, "[ ] ")
+	else
+		insert(#indent, "- [ ] ")
+	end
+end
+
+vim.api.nvim_create_autocmd("FileType", {
+	pattern = "markdown",
+	group = vim.api.nvim_create_augroup("markdown-tasks", { clear = true }),
+	callback = function(ev)
+		vim.keymap.set("n", "<leader>l", toggle_task, { buffer = ev.buf, desc = "Toggle task" })
+	end,
+})
 
 -- Theme-aware markdown colors (re-applied whenever the colorscheme changes)
 local function markdown_highlights()
